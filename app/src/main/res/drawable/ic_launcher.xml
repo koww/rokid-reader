@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 黑底圆角方块 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M18,18h72a8,8 0 0 1 8,8v56a8,8 0 0 1 -8,8h-72a8,8 0 0 1 -8,-8v-56a8,8 0 0 1 8,-8z" />
+    <!-- 白色描边 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:pathData="M18,18h72a8,8 0 0 1 8,8v56a8,8 0 0 1 -8,8h-72a8,8 0 0 1 -8,-8v-56a8,8 0 0 1 8,-8z" />
+    <!-- 打开的书：左页 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,36c-6,-5 -15,-7 -24,-7v42c9,0 18,2 24,7z" />
+    <!-- 打开的书：右页 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,36c6,-5 15,-7 24,-7v42c-9,0 -18,2 -24,7z" />
+    <!-- 书脊缝隙 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M52,34h4v44h-4z" />
+</vector>

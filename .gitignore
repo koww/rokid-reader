@@ -1,0 +1,31 @@
+# ---- Android / Gradle ----
+.gradle/
+build/
+*/build/
+app/build/
+local.properties
+*.iml
+.cxx/
+.externalNativeBuild/
+
+# ---- Android Studio / IntelliJ ----
+.idea/
+*.ipr
+*.iws
+navigation/
+captures/
+.output.json
+
+# ---- 签名密钥（不入库，单独备份）----
+*.keystore
+*.jks
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
+
+# ---- 临时文件 ----
+*.log
+*.tmp
+*.bak
+*~
