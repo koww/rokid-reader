@@ -21,6 +21,9 @@ class ReaderView(context: Context) : View(context) {
     var book: Book? = null
         set(value) {
             field = value
+            // View 已 measure（书架打开时 ReaderView 就在容器里）时 onSizeChanged 不会再触发，
+            // 必须在此主动 repaginate；repaginate 内部会处理 width=0 的边界（静默跳过，
+            // 等 onSizeChanged 补上——首次 attach 的场景）
             repaginate()
         }
 
@@ -36,6 +39,17 @@ class ReaderView(context: Context) : View(context) {
     private val progressFgPaint = Paint().apply {
         color = Color.WHITE
     }
+    /** 章节标题：加粗，与正文区分 */
+    private val chapterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        isFakeBoldText = true
+    }
+    /** 空书架/加载中提示文字 */
+    private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 40f
+        textAlign = Paint.Align.CENTER
+    }
 
     private val paddingX = 56f
     private val paddingTop = 48f
@@ -50,6 +64,7 @@ class ReaderView(context: Context) : View(context) {
 
     fun initSettings(settings: SettingsStore) {
         this.settings = settings
+        chapterPaint.textSize = textPaint.textSize
         applySettings()
     }
 
@@ -59,19 +74,18 @@ class ReaderView(context: Context) : View(context) {
         val newSize = SettingsStore.FONT_SIZES[settings.fontSizeIndex]
         if (textPaint.textSize != newSize) {
             textPaint.textSize = newSize
+            chapterPaint.textSize = newSize
             repaginate()
         }
     }
 
-    /** 翻页或字号变化后重新折行 */
+    /** 翻页或字号变化后重新折行。
+     *  只在尺寸有效时执行；无效时静默跳过（onSizeChanged 会在 measure 后补上）。 */
     fun repaginate() {
         val b = book ?: return
         val usableWidth = width - paddingX * 2
         val usableHeight = height - (paddingTop + progressBarHeight + progressBarMargin).toInt()
-        if (usableWidth <= 0 || usableHeight <= 0) {
-            post { repaginate() }
-            return
-        }
+        if (usableWidth <= 0 || usableHeight <= 0) return
         b.paginate(textPaint, lineHeight, usableWidth, usableHeight)
         invalidate()
     }
@@ -106,13 +120,6 @@ class ReaderView(context: Context) : View(context) {
         if (dir > 0) nextPage() else prevPage()
     }
 
-    /** 切换字号档位（本地快捷键用，与网页设置同步） */
-    fun cycleFontSize() {
-        if (!::settings.isInitialized) return
-        settings.fontSizeIndex = (settings.fontSizeIndex + 1) % SettingsStore.FONT_SIZES.size
-        applySettings()
-    }
-
     private fun notifyProgress() {
         book?.let { onProgressChanged?.invoke(it.progressRatio) }
     }
@@ -130,11 +137,12 @@ class ReaderView(context: Context) : View(context) {
             return
         }
 
-        // 绘制当前位置可见行
+        // 绘制当前位置可见行（「...」包裹的行视为章节标题，加粗）
         var y = paddingTop + textPaint.textSize
         for (line in b.visibleLines()) {
             if (line.isNotEmpty()) {
-                canvas.drawText(line, paddingX, y, textPaint)
+                val isChapterTitle = line.startsWith("「") && line.endsWith("」")
+                canvas.drawText(line, paddingX, y, if (isChapterTitle) chapterPaint else textPaint)
             }
             y += lineHeight
         }
@@ -154,11 +162,6 @@ class ReaderView(context: Context) : View(context) {
     }
 
     private fun drawCenteredText(canvas: Canvas, text: String) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 40f
-            textAlign = Paint.Align.CENTER
-        }
-        canvas.drawText(text, width / 2f, height / 2f, paint)
+        canvas.drawText(text, width / 2f, height / 2f, hintPaint)
     }
 }

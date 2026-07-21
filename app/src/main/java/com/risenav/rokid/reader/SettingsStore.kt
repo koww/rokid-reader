@@ -24,7 +24,9 @@ class SettingsStore(context: Context) {
 
     var fontSizeIndex: Int
         get() = prefs.getInt(KEY_FONT_SIZE, 0).coerceIn(0, FONT_SIZES.size - 1)   // 默认小
-        set(value) = prefs.edit().putInt(KEY_FONT_SIZE, value).apply()
+        set(value) = prefs.edit()
+            .putInt(KEY_FONT_SIZE, value.coerceIn(0, FONT_SIZES.size - 1))
+            .apply()
 
     /** 翻页幅度（0~1），默认 ¾ 页 */
     var scrollRatio: Float

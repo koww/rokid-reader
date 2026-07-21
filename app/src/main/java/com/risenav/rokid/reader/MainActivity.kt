@@ -1,11 +1,8 @@
 package com.risenav.rokid.reader
 
 import android.annotation.SuppressLint
-import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -22,8 +19,8 @@ import androidx.core.view.WindowInsetsControllerCompat
  *
  * 交互模型（适配眼镜滚轮 + 触摸板）:
  *   滚轮 / 方向键上下 —— 书架移动选中项；阅读时翻页（上滚=上一页，下滚=下一页）
- *   鼠标指针 —— 书架悬停高亮，单击打开
- *   ENTER / 滚轮按压 —— 书架打开书籍；阅读时单击切换字号，双击回书架
+ *   ENTER / 滚轮按压 —— 书架打开书籍；阅读时向下翻一页（与滚轮下滚一致）
+ *   BACK / 滚轮按压 —— 阅读时回书架；书架页退出程序
  *   触摸板滚轮 —— 阅读时平滑滚动（映射为翻页）
  *
  * 阅读进度自动保存，重新打开同一本书时恢复。
@@ -37,14 +34,6 @@ class MainActivity : AppCompatActivity() {
     private var libraryView: LibraryView? = null
     private var currentBook: Book? = null
     private var transferServer: TransferServer? = null
-
-    private val handler = Handler(Looper.getMainLooper())
-
-    /** 双击判定窗口（毫秒） */
-    private val doubleTapTimeout = 350L
-
-    /** 待执行的单击动作；双击到来时取消 */
-    private var pendingClick: Runnable? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,21 +65,6 @@ class MainActivity : AppCompatActivity() {
 
         // 启动显示书架
         showLibrary()
-
-        // 处理从文件管理器直接打开 txt 的 intent
-        handleOpenIntent(intent)
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        handleOpenIntent(intent)
-    }
-
-    private fun handleOpenIntent(intent: Intent?) {
-        val uri = intent?.data ?: return
-        if (intent.action == Intent.ACTION_VIEW) {
-            openBookFromUri(uri, null)
-        }
     }
 
     // ---------- 书架 ----------
@@ -107,8 +81,7 @@ class MainActivity : AppCompatActivity() {
                 hideLibrary()
                 openBookFromUri(Uri.parse(entry.uri), entry.title)
             },
-            onToggleServer = { toggleServer() },
-            onClose = { /* 书架是最底层，不关闭 */ }
+            onToggleServer = { toggleServer() }
         )
         // 恢复服务器状态显示（书架重建时服务器可能还在运行）
         transferServer?.let {
@@ -135,22 +108,10 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- 书籍打开 ----------
 
-    /** 从 uri 解析显示标题（优先系统 DISPLAY_NAME，否则用路径末段） */
-    private fun resolveTitle(uri: Uri): String {
-        var title: String? = null
-        try {
-            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (idx >= 0 && cursor.moveToFirst()) title = cursor.getString(idx)
-            }
-        } catch (e: Exception) { /* ignore */ }
-        return title ?: uri.lastPathSegment ?: "未命名"
-    }
-
-    private fun openBookFromUri(uri: Uri, title: String?) {
-        val book = Book(uri, title ?: resolveTitle(uri), this)
+    private fun openBookFromUri(uri: Uri, title: String) {
+        val book = Book(uri, title, this)
         if (!book.load()) {
-            Toast.makeText(this, "无法打开文件", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "无法打开文件（不存在或超过 30MB）", Toast.LENGTH_SHORT).show()
             showLibrary()
             return
         }
@@ -213,7 +174,9 @@ class MainActivity : AppCompatActivity() {
     // ---------- 输入处理 ----------
 
     private fun logEvent(tag: String, msg: String) {
-        android.util.Log.d("RokidInput", "[$tag] $msg")
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("RokidInput", "[$tag] $msg")
+        }
     }
 
     /** 触摸板滚轮：书架移动选中；阅读时翻页 */
@@ -292,32 +255,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 单击/双击判定：书架单击打开、双击退出；阅读单击切字号、双击回书架 */
+    /** ENTER 确认：书架打开书籍 / 切换传书；阅读时向下翻一页（与滚轮下滚一致） */
     private fun handleConfirmKey() {
-        val pending = pendingClick
-        if (pending != null) {
-            handler.removeCallbacks(pending)
-            pendingClick = null
-            onDoubleTap()
-        } else {
-            val action = Runnable {
-                pendingClick = null
-                if (isLibraryVisible) {
-                    libraryView?.confirm()
-                } else {
-                    readerView.cycleFontSize()
-                }
-            }
-            pendingClick = action
-            handler.postDelayed(action, doubleTapTimeout)
-        }
-    }
-
-    private fun onDoubleTap() {
         if (isLibraryVisible) {
-            finish()          // 书架双击 = 退出
+            libraryView?.confirm()
         } else {
-            showLibrary()     // 阅读双击 = 回书架
+            readerView.nextPage()
         }
     }
 
@@ -330,38 +273,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 上一次触摸抬起的时间，用于书架页双击退出判定 */
-    private var lastTouchUpTime = 0L
-
-    /** 触摸：书架点选由 LibraryView 处理，但双击需在此拦截退出；
-     *  阅读时触摸单击=翻页 */
+    /** 触摸：书架点选由 LibraryView 处理；阅读时触摸事件不响应——
+     *  按压滚轮会同时发触摸 UP 和 ENTER，两者都翻页会翻两页，ENTER 已覆盖 */
     override fun onTouchEvent(event: MotionEvent): Boolean {
         logEvent("TOUCH", "action=${event.action} x=${event.x} y=${event.y}")
-        if (isLibraryVisible) {
-            // 双击检测：LibraryView 的单击点选照常放行，
-            // 但快速连续两次 ACTION_UP 判定为双击退出
-            if (event.action == MotionEvent.ACTION_UP) {
-                val now = System.currentTimeMillis()
-                if (now - lastTouchUpTime < doubleTapTimeout) {
-                    lastTouchUpTime = 0
-                    finish()
-                    return true
-                }
-                lastTouchUpTime = now
-            }
-            return super.onTouchEvent(event)   // LibraryView 自己处理点选
-        }
-        // 阅读中：触摸下半屏=下一页，上半屏=上一页（眼镜触摸板常用映射）
-        if (event.action == MotionEvent.ACTION_UP) {
-            if (event.y > readerView.height / 2f) readerView.nextPage() else readerView.prevPage()
-        }
-        return true
+        return super.onTouchEvent(event)
     }
 
     override fun onDestroy() {
-        pendingClick?.let { handler.removeCallbacks(it) }
         stopServer()
-        currentBook?.let { libraryStore.saveProgress(it.uri.toString(), it.progressRatio) }
+        // 进度无需在此保存：onProgressChanged 翻页时已存，showLibrary 回书架时也存了
         super.onDestroy()
     }
 }

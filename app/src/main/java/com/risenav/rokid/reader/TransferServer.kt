@@ -132,6 +132,9 @@ class TransferServer(
         }
     }
 
+    /** 最大请求体大小（200MB）：上传书籍够用，防恶意/畸形请求撑爆内存 */
+    private val maxRequestBytes = 200 * 1024 * 1024
+
     private fun readRequest(input: InputStream): ByteArray? {
         val buffer = ByteArrayOutputStream()
         val chunk = ByteArray(8192)
@@ -151,25 +154,18 @@ class TransferServer(
                     contentLength = headerText.split("\r\n")
                         .firstOrNull { it.lowercase().startsWith("content-length:") }
                         ?.substringAfter(':')?.trim()?.toIntOrNull() ?: 0
+                    // Content-Length 超限直接拒收
+                    if (contentLength > maxRequestBytes) return null
                 }
             }
             if (headerEnd >= 0 && data.size >= headerEnd + 4 + contentLength) {
                 return data
             }
-            if (n == 0) break
+            // 实际读取超限也拒收（客户端没发 Content-Length 或发少了）
+            if (data.size > maxRequestBytes) return null
         }
         val data = buffer.toByteArray()
         return if (data.isNotEmpty()) data else null
-    }
-
-    private fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
-        outer@ for (i in 0..haystack.size - needle.size) {
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) continue@outer
-            }
-            return i
-        }
-        return -1
     }
 
     // ---------- API ----------
@@ -198,14 +194,14 @@ class TransferServer(
         if (!file.exists() || !file.isFile) {
             return sendResponse(output, 404, "text/plain", "not found".toByteArray())
         }
-        val bytes = file.readBytes()
         val encodedName = java.net.URLEncoder.encode(file.name, "UTF-8").replace("+", "%20")
         val head = "HTTP/1.1 200 OK\r\n" +
-                "Content-Type: text/plain; charset=utf-8\r\n" +
+                "Content-Type: application/octet-stream\r\n" +
                 "Content-Disposition: attachment; filename*=UTF-8''$encodedName\r\n" +
-                "Content-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+                "Content-Length: ${file.length()}\r\nConnection: close\r\n\r\n"
         output.write(head.toByteArray(Charsets.ISO_8859_1))
-        output.write(bytes)
+        // 流式传输，避免大文件全量加载到内存
+        file.inputStream().use { it.copyTo(output, bufferSize = 64 * 1024) }
         output.flush()
     }
 
@@ -213,12 +209,18 @@ class TransferServer(
         val name = File(fileName).name
         val file = File(booksDir, name)
         if (file.exists()) {
-            file.delete()
-            // 同时从书架移除（uri 是 file:// 路径）
-            libraryStore.removeBook(Uri.fromFile(file).toString())
-            onLibraryChanged()
+            // 删除失败（文件被占用等）时不移除书架条目，避免"书架没了文件还在"
+            if (file.delete()) {
+                // 同时从书架移除（uri 是 file:// 路径）
+                libraryStore.removeBook(Uri.fromFile(file).toString())
+                onLibraryChanged()
+                sendJson(output, "{\"ok\":true}")
+            } else {
+                sendJson(output, "{\"ok\":false,\"error\":\"delete failed\"}")
+            }
+            return
         }
-        sendJson(output, "{\"ok\":true}")
+        sendJson(output, "{\"ok\":true}")   // 文件不存在视为已删除
     }
 
     private fun handleSaveSettings(body: ByteArray, output: java.io.OutputStream) {
@@ -241,20 +243,24 @@ class TransferServer(
         val boundary = contentType.substringAfter("boundary=", "").trim()
         if (boundary.isEmpty()) return sendText(output, 400, "missing boundary")
 
-        val text = String(body, Charsets.ISO_8859_1)
-        val nameMarker = "filename=\""
-        val nameStart = text.indexOf(nameMarker)
+        // 全程在原始字节上操作：boundary 字符串可能恰好出现在二进制文件内容里，
+        // 用 String.indexOf 会被 String 编码/解码干扰，必须在字节数组上找
+        val nameMarker = "filename=\"".toByteArray(Charsets.ISO_8859_1)
+        val nameStart = indexOf(body, nameMarker)
         if (nameStart < 0) return sendText(output, 400, "no file field")
-        val nameEnd = text.indexOf('"', nameStart + nameMarker.length)
+        val nameFieldStart = nameStart + nameMarker.size
+        val nameEnd = indexOf(body, byteArrayOf('"'.code.toByte()), nameFieldStart)
         if (nameEnd < 0) return sendText(output, 400, "bad filename")
-        val rawName = decodeFileName(text.substring(nameStart + nameMarker.length, nameEnd))
+        val rawName = decodeFileName(String(body, nameFieldStart, nameEnd - nameFieldStart, Charsets.ISO_8859_1))
 
-        val contentStart = text.indexOf("\r\n\r\n", nameEnd)
+        val headerEndMarker = "\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
+        val contentStart = indexOf(body, headerEndMarker, nameEnd)
         if (contentStart < 0) return sendText(output, 400, "bad part header")
-        val dataStart = contentStart + 4
-        val dataEnd = text.indexOf("\r\n--$boundary", dataStart)
+        val dataStart = contentStart + headerEndMarker.size
+        val endMarker = "\r\n--$boundary".toByteArray(Charsets.ISO_8859_1)
+        val dataEnd = indexOf(body, endMarker, dataStart)
         if (dataEnd < 0) return sendText(output, 400, "bad part end")
-        val fileBytes = text.substring(dataStart, dataEnd).toByteArray(Charsets.ISO_8859_1)
+        val fileBytes = body.copyOfRange(dataStart, dataEnd)
 
         // 支持的格式：txt / epub / md / markdown，其他一律按 txt 存
         val supportedExts = listOf(".txt", ".epub", ".md", ".markdown")
@@ -268,10 +274,23 @@ class TransferServer(
         FileOutputStream(dest).use { it.write(fileBytes) }
 
         Log.d("TransferServer", "received ${fileBytes.size} bytes -> ${dest.name}")
-        val title = safeName.removeSuffix(".txt")
+        // 标题去掉扩展名（任意扩展名，不只是 .txt）
+        val title = safeName.substringBeforeLast('.')
         libraryStore.addBook(Uri.fromFile(dest).toString(), title)
         onLibraryChanged()
         sendText(output, 200, "ok: $safeName")
+    }
+
+    /** 在字节数组中查找子串（可指定起始位置），KMP 简化版——数据量小暴力匹配够用 */
+    private fun indexOf(haystack: ByteArray, needle: ByteArray, fromIndex: Int = 0): Int {
+        if (needle.isEmpty() || haystack.size < needle.size) return -1
+        outer@ for (i in fromIndex..haystack.size - needle.size) {
+            for (j in needle.indices) {
+                if (haystack[i + j] != needle[j]) continue@outer
+            }
+            return i
+        }
+        return -1
     }
 
     private fun decodeFileName(raw: String): String {
@@ -289,10 +308,14 @@ class TransferServer(
 
     private fun uniqueFile(name: String): File {
         var f = File(booksDir, name)
+        if (!f.exists()) return f
+        // 保留原扩展名重命名：name.epub -> name_1.epub
+        val dot = name.lastIndexOf('.')
+        val base = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
         var i = 1
         while (f.exists()) {
-            val base = name.removeSuffix(".txt")
-            f = File(booksDir, "${base}_$i.txt")
+            f = File(booksDir, "${base}_$i$ext")
             i++
         }
         return f

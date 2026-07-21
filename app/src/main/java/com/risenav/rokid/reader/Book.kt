@@ -36,13 +36,31 @@ class Book(
 
     val lineCount: Int get() = lines.size
 
+    /** 单文件大小上限：txt/epub 全量加载到内存，超限会 OOM。
+     *  30MB 对纯文字书籍足够（红楼梦 txt ~2MB，起点长篇 epub ~10MB）。 */
+    private val maxFileBytes = 30 * 1024 * 1024L
+
     /** 加载文件内容：按扩展名路由到 epub/md/txt 解析器 */
     fun load(): Boolean {
+        // 先查文件大小，超限直接失败（上层 toast 提示），避免全量读入 OOM
+        val size = queryFileSize()
+        if (size < 0) return false   // 文件不存在或不可读
+        if (size > maxFileBytes) return false
+
         val name = (uri.lastPathSegment ?: "").lowercase()
         return when {
             name.endsWith(".epub") -> loadEpub()
             name.endsWith(".md") || name.endsWith(".markdown") -> loadPlainText(stripMarkdown = true)
             else -> loadPlainText(stripMarkdown = false)   // txt 及其他按纯文本
+        }
+    }
+
+    /** 查询文件大小（字节）；失败返回 -1 */
+    private fun queryFileSize(): Long {
+        return try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+        } catch (e: Exception) {
+            -1L
         }
     }
 
@@ -126,16 +144,23 @@ class Book(
         }
         lines = newLines
         linesPerPage = maxOf(1, usableHeight / lineHeight)
-        seekToRatio(oldRatio)   // 重新折行后恢复阅读位置
+        // 重新折行后恢复阅读位置：优先用外部暂存的进度（load 后首次 paginate），
+        // 否则用折行前的旧位置比例（翻页/字号变化时的内部 repaginate）
+        val restore = pendingRatio ?: oldRatio
+        pendingRatio = null
+        seekToRatio(restore)
     }
 
     /**
      * 前进/后退指定行数。
      * @param delta 正数前进，负数后退
+     *
+     * 上限是 lineCount - linesPerPage（而不是 lineCount - 1）：
+     * 保证最后一页总是满页，不会滚到只剩 1 行的"死页"。
      */
     fun scrollBy(delta: Int): Boolean {
         val old = position
-        position = (position + delta).coerceIn(0, maxOf(0, lineCount - 1))
+        position = (position + delta).coerceIn(0, maxOf(0, lineCount - linesPerPage))
         return position != old
     }
 
@@ -146,12 +171,21 @@ class Book(
         return lines.subList(position.coerceIn(0, lines.size - 1), end)
     }
 
+    /** 待恢复的进度（折行前暂存，paginate 完成后恢复） */
+    private var pendingRatio: Float? = null
+
     /** 当前阅读进度（0~1），用于持久化恢复 */
     val progressRatio: Float
-        get() = if (lineCount == 0) 0f else position.toFloat() / maxOf(1, lineCount - linesPerPage)
+        get() = if (lineCount == 0) pendingRatio ?: 0f else position.toFloat() / maxOf(1, lineCount - linesPerPage)
 
     fun seekToRatio(ratio: Float) {
+        if (lineCount == 0) {
+            // 还没折行（load 后、paginate 前），暂存待恢复
+            pendingRatio = ratio
+            return
+        }
         val maxPos = maxOf(0, lineCount - linesPerPage)
         position = (ratio * maxPos).toInt().coerceIn(0, maxPos)
+        pendingRatio = null
     }
 }

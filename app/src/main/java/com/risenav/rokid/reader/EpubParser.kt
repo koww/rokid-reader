@@ -27,8 +27,16 @@ object EpubParser {
                 val zip = ZipInputStream(input)
                 var entry = zip.nextEntry
                 while (entry != null) {
-                    if (!entry.isDirectory) {
-                        entries[entry.name] = zip.readBytes()
+                    // 只读文本类 entry，跳过图片/字体/CSS 等二进制资源（省内存）
+                    val name = entry.name
+                    val isTextResource = !entry.isDirectory && (
+                            name.endsWith(".opf", true) ||
+                            name.endsWith(".html", true) ||
+                            name.endsWith(".xhtml", true) ||
+                            name.endsWith(".htm", true) ||
+                            name.endsWith(".ncx", true))
+                    if (isTextResource) {
+                        entries[name] = zip.readBytes()
                     }
                     zip.closeEntry()
                     entry = zip.nextEntry
@@ -42,34 +50,56 @@ object EpubParser {
             val opfDir = opfName.substringBeforeLast('/', "")
 
             // manifest: id -> href
+            // 先匹配 <item ...> 标签整体（DOT_MATCHES_ALL 允许属性跨行），再提取属性
             val manifest = mutableMapOf<String, String>()
-            Regex("<item[^>]*id=\"([^\"]+)\"[^>]*href=\"([^\"]+)\"[^>]*/>").findAll(opf).forEach {
-                manifest[it.groupValues[1]] = it.groupValues[2]
+            val attr = { tag: String, name: String ->
+                Regex("$name=\"([^\"]+)\"").find(tag)?.groupValues?.get(1)
             }
-            // 也匹配属性顺序相反的情况（href 在 id 前）
-            Regex("<item[^>]*href=\"([^\"]+)\"[^>]*id=\"([^\"]+)\"[^>]*/>").findAll(opf).forEach {
-                manifest[it.groupValues[2]] = it.groupValues[1]
+            Regex("<item\\b[^>]*>", RegexOption.DOT_MATCHES_ALL).findAll(opf).forEach { m ->
+                val tag = m.value
+                val id = attr(tag, "id")
+                val href = attr(tag, "href")
+                if (id != null && href != null) manifest[id] = href
             }
 
-            // spine: 阅读顺序的 id 列表
-            val spine = Regex("<itemref[^>]*idref=\"([^\"]+)\"")
-                .findAll(opf).map { it.groupValues[1] }.toList()
+            // spine: 阅读顺序的 id 列表（同样允许跨行）
+            val spine = Regex("<itemref\\b[^>]*>", RegexOption.DOT_MATCHES_ALL)
+                .findAll(opf).mapNotNull { attr(it.value, "idref") }.toList()
 
             val chapters = mutableListOf<Chapter>()
-            for (id in spine) {
+            // 用 spine 下标（不是 chapters.size）作 fallback 标题序号——空章节被跳过时
+            // chapters.size 会跳号，导致"第 N 章"与 spine 实际位置错位
+            for ((spineIndex, id) in spine.withIndex()) {
                 val href = manifest[id] ?: continue
-                val path = if (opfDir.isEmpty()) href else "$opfDir/$href"
+                // href 可能含 ../（OPF 在子目录、引用上级文件），直接字符串拼接
+                // 会得到 "OEBPS/../text/ch1.xhtml"，与 zip entry 名不匹配——需规范化
+                val rawPath = if (opfDir.isEmpty()) href else "$opfDir/$href"
+                val path = normalizePath(rawPath)
                 val html = entries[path] ?: entries[path.replace("%20", " ")] ?: continue
                 val text = String(html, Charsets.UTF_8)
                 val paras = htmlToParagraphs(text)
                 if (paras.isNotEmpty()) {
-                    chapters.add(Chapter(guessTitle(text, chapters.size), paras))
+                    chapters.add(Chapter(guessTitle(text, spineIndex), paras))
                 }
             }
             if (chapters.isEmpty()) fallbackParse(entries) else chapters
         } catch (e: Exception) {
             null
         }
+    }
+
+    /** 规范化 zip 内路径：处理 "a/./b" 和 "a/../b"，与 zip entry 命名对齐 */
+    private fun normalizePath(path: String): String {
+        val parts = path.split("/")
+        val stack = mutableListOf<String>()
+        for (p in parts) {
+            when (p) {
+                "", "." -> { /* 跳过 */ }
+                ".." -> { if (stack.isNotEmpty()) stack.removeAt(stack.size - 1) }
+                else -> stack.add(p)
+            }
+        }
+        return stack.joinToString("/")
     }
 
     /** 找不到 OPF 时的兜底：按文件名顺序解析所有 html/xhtml */
@@ -94,8 +124,8 @@ object EpubParser {
         t = Regex("<script[^>]*>.*?</script>", RegexOption.DOT_MATCHES_ALL).replace(t, "")
         t = Regex("<style[^>]*>.*?</style>", RegexOption.DOT_MATCHES_ALL).replace(t, "")
         t = Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL).replace(t, "")
-        // 块级标签换成换行
-        t = Regex("</(p|div|h[1-6]|li|blockquote|tr|section|article)>").replace(t, "\n")
+        // 块级标签换成换行（td/th 也算——否则表格单元格会全挤在一行）
+        t = Regex("</(p|div|h[1-6]|li|blockquote|tr|td|th|section|article)>").replace(t, "\n")
         t = Regex("<(br|hr)[^>]*/?>").replace(t, "\n")
         // 剥掉所有剩余标签
         t = Regex("<[^>]+>").replace(t, "")

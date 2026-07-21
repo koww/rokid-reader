@@ -17,15 +17,14 @@ import android.view.View
  *
  * 交互：
  *   滚轮 / 方向键 —— 移动选中项
- *   单击 / ENTER —— 打开书籍 / 开关传书 / 选文件
+ *   单击 / ENTER —— 打开书籍 / 开关传书
  *   鼠标指针 —— 悬停高亮，单击直接触发
  */
 class LibraryView(
     context: Context,
     private val entries: List<LibraryStore.BookEntry>,
     private val onOpenBook: (LibraryStore.BookEntry) -> Unit,
-    private val onToggleServer: () -> Unit,
-    private val onClose: () -> Unit
+    private val onToggleServer: () -> Unit
 ) : View(context) {
 
     /** 列表项：书架书籍 + 传书入口 */
@@ -38,7 +37,13 @@ class LibraryView(
 
     /** 传书服务器状态（由 MainActivity 更新后调用 invalidate） */
     var serverRunning = false
-        set(value) { field = value; invalidate() }
+        set(value) {
+            field = value
+            // ServerToggle 行高会随开关变化（76↔130），选中项可能被挤出可视窗口，
+            // 重新调整 windowTop 保证选中项始终可见
+            ensureSelectedVisible()
+            invalidate()
+        }
     var serverAddress = ""
         set(value) { field = value; invalidate() }
 
@@ -112,6 +117,12 @@ class LibraryView(
     private fun move(dir: Int) {
         if (items.isEmpty()) return
         selected = (selected + dir).coerceIn(0, items.size - 1)
+        ensureSelectedVisible()
+        invalidate()
+    }
+
+    /** 调整 windowTop 使 selected 落在可视窗口内 */
+    private fun ensureSelectedVisible() {
         if (selected < windowTop) windowTop = selected
         // 选中项滑出可视底部时逐步下移窗口，直到可见（有上限防死循环）
         var guard = 0
@@ -119,7 +130,6 @@ class LibraryView(
             windowTop++
             guard++
         }
-        invalidate()
     }
 
     fun confirm() {
@@ -129,8 +139,6 @@ class LibraryView(
             null -> Unit
         }
     }
-
-    fun close() = onClose()
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -157,8 +165,11 @@ class LibraryView(
             when (item) {
                 is Item.BookItem -> {
                     canvas.drawText(ellipsize(item.entry.title, paint, w - paddingX * 2), paddingX, y, paint)
-                    val pct = (item.entry.progress * 100).toInt()
-                    val sub = if (pct > 0) "已读 $pct%" else "未读"
+                    val sub = when {
+                        item.entry.progress <= 0f -> "未读"
+                        item.entry.progress < 0.01f -> "已读 <1%"
+                        else -> "已读 ${(item.entry.progress * 100).toInt()}%"
+                    }
                     canvas.drawText(sub, paddingX, y + 40f, subPaint)
                 }
                 Item.ServerToggle -> {
@@ -175,11 +186,23 @@ class LibraryView(
         }
     }
 
+    /** 触摸按下时的 Y 坐标，用于区分"点选"和"滑动" */
+    private var downY = -1f
+
+    /** 滑动判定阈值（像素）：UP 与 DOWN 距离超过此值视为滚动而非点选 */
+    private val touchSlop = 24f
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val index = hitTest(event.y)
         when (event.action) {
-            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_DOWN -> {
+                downY = event.y
+                if (index >= 0 && index != selected) {
+                    selected = index
+                    invalidate()
+                }
+            }
             MotionEvent.ACTION_MOVE,
             MotionEvent.ACTION_HOVER_MOVE -> {
                 if (index >= 0 && index != selected) {
@@ -188,19 +211,27 @@ class LibraryView(
                 }
             }
             MotionEvent.ACTION_UP -> {
-                if (index >= 0) {
+                // 只有 UP 与 DOWN 位置接近才视为点选，否则是滑动结束
+                val isTap = downY >= 0 && Math.abs(event.y - downY) < touchSlop
+                downY = -1f
+                if (isTap && index >= 0) {
                     selected = index
                     confirm()
                 }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                downY = -1f
             }
         }
         return true
     }
 
-    /** 按 Y 坐标查找点中的项（遍历累加实际行高） */
+    /** 按 Y 坐标查找点中的项（遍历累加实际行高）。
+     *  从 listStartY 起算（而不是 listStartY - 58f），避免把"书架"标题区域
+     *  误判为第一项——标题画在 y=88，原起点 74 会把它算进 item 0 的命中区。 */
     private fun hitTest(y: Float): Int {
-        if (y < listStartY - 58f) return -1
-        var curY = listStartY - 58f
+        if (y < listStartY) return -1
+        var curY = listStartY
         for (i in windowTop until items.size) {
             curY += heightOf(items[i])
             if (y < curY) return i
@@ -210,10 +241,12 @@ class LibraryView(
 
     private fun ellipsize(text: String, paint: Paint, maxWidth: Float): String {
         if (maxWidth <= 0 || paint.measureText(text) <= maxWidth) return text
-        var t = text
-        while (t.length > 1 && paint.measureText("$t…") > maxWidth) {
-            t = t.dropLast(1)
-        }
-        return "$t…"
+        // 先量省略号宽度，再从 maxWidth 里扣掉，剩余空间能放多少字符用 breakText 一次算出。
+        // 比逐字 dropLast + measureText 的 O(n²) 循环快，且 breakText 原生处理 UTF-16
+        // 代理对边界，不会把 emoji/生僻字切成半个。
+        val ellipsisWidth = paint.measureText("…")
+        val n = paint.breakText(text, true, maxWidth - ellipsisWidth, null)
+        if (n <= 0) return "…"
+        return text.substring(0, n) + "…"
     }
 }
