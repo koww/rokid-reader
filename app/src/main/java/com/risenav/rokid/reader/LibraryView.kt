@@ -6,8 +6,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 
 /**
  * 书库视图：书架列表 + 局域网传书 + 打开新文件入口。
@@ -34,6 +36,11 @@ class LibraryView(
     }
 
     private val items: List<Item> = entries.map { Item.BookItem(it) } + Item.ServerToggle
+
+    init {
+        // 同 ReaderView：纯绘制 View 默认可能被剪出无障碍节点树
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    }
 
     /** 传书服务器状态（由 MainActivity 更新后调用 invalidate） */
     var serverRunning = false
@@ -138,6 +145,40 @@ class LibraryView(
             Item.ServerToggle -> onToggleServer()
             null -> Unit
         }
+    }
+
+    // ---------- 无障碍：给蓝牙指环等无障碍服务的选择通道 ----------
+    //
+    // 上报 click/scroll 后，指环单击 = 打开选中项（而不是让服务注入一个落在屏幕
+    // 中心的假触摸、点开中间那本书）。同 ReaderView，只改节点信息不改触摸行为。
+
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.isClickable = true
+        info.isScrollable = true
+        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
+        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD)
+        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD)
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        when (action) {
+            AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK.id -> {
+                confirm()
+                return true
+            }
+            // 到头/到尾也返回 true：返回 false 会让无障碍服务退回注入假滑动，
+            // 而书架的 onTouchEvent 会响应它，把选中项跳到假坐标落点上
+            AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD.id -> {
+                moveDown()
+                return true
+            }
+            AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD.id -> {
+                moveUp()
+                return true
+            }
+        }
+        return super.performAccessibilityAction(action, arguments)
     }
 
     override fun onDraw(canvas: Canvas) {

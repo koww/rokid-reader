@@ -51,6 +51,20 @@ Rokid 眼镜滚轮滚一下 = 系统发 `NOTIFICATION` + `RIGHT/LEFT` + `DOWN/UP
 
 触摸板滚轮发的是 `MotionEvent.ACTION_SCROLL`（AXIS_VSCROLL），在 `dispatchGenericMotionEvent` 拦截（WebView/子 View 会抢 `onGenericMotionEvent`，必须在 dispatch 层拦）。
 
+### 输入：无障碍动作通道（蓝牙指环）
+
+R08 指环这类外设由**无障碍服务**接管：它吃掉指环按键，不会转发 KeyEvent，只会对当前界面执行无障碍动作，动作失败才退回注入假触摸。阅读页触摸不响应（见上），所以假触摸全部无效——`ReaderView`/`LibraryView` 因此在无障碍节点上上报动作：`ACTION_CLICK`（阅读=下一页，书架=打开选中项）、`ACTION_SCROLL_FORWARD/BACKWARD`（阅读=下/上一页，书架=下/上移选中）。
+
+三条硬约束，改动前必读：
+
+- **只改节点信息，不改 View 状态**：在 `onInitializeAccessibilityNodeInfo` 里设 `info.isClickable/isScrollable`，**绝不能**调 `setClickable`/`setOnClickListener`——那会让 View 真的响应触摸，滚轮按压的「触摸 + ENTER」双通道又会翻两页。
+- **绝不能设 focusable**：无障碍服务的单轴导航先试 `ACTION_FOCUS`，一旦成功就直接返回、不再发 scroll，翻页会整个失效。纯绘制 View 默认不可获焦，正好满足。
+- **`ReaderView.readerActive` 必须跟着书架开关走**（`MainActivity.showLibrary/hideLibrary`）：兄弟 View 遮挡不会让 `isVisibleToUser` 变 false，书架打开时若还上报翻页动作，指环会翻动看不见的书。
+
+另外两个 View 都设了 `importantForAccessibility = YES`：纯绘制 View 没有文字/描述，默认可能被剪出节点树。书架的 scroll 动作到头也返回 `true`——返回 `false` 会让服务退回注入假滑动，而书架的 `onTouchEvent` 会响应它，把选中项跳到假坐标落点上。
+
+调试：`adb logcat -s R08Bridge R08Navigator R08Gestures` 看服务侧。出现 `Performed accessibility scroll` / `Clicked focused accessibility node` 说明走通了；出现 `Dispatched vertical swipe` / `Dispatched tap` 说明又退回假触摸。
+
 调试输入映射：`adb logcat -d | grep RokidInput` 会打出所有按键/滚轮/触摸事件（仅 debug 包，release 被 `BuildConfig.DEBUG` 关掉）。
 
 ### 局域网服务器：手写零依赖 HTTP

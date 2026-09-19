@@ -96,11 +96,14 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        // 书架盖住阅读页后，阅读页不再对无障碍服务上报翻页动作（否则指环会翻看不见的书）
+        readerView.readerActive = false
     }
 
     private fun hideLibrary() {
         libraryView?.let { container.removeView(it) }
         libraryView = null
+        readerView.readerActive = true
     }
 
     private val isLibraryVisible: Boolean
